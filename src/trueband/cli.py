@@ -8,9 +8,8 @@ import os
 import re
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TextIO
 
 from trueband import __version__
 from trueband.classify import (
@@ -25,12 +24,7 @@ from trueband.explain import render_plot, render_text
 from trueband.ffmpeg import FFmpegNotFoundError, Tools, find_tools
 from trueband.report import Row, sort_rows, summary_line, write_csv, write_json, write_table
 from trueband.scan import DEFAULT_EXTENSIONS, Progress, ResultCache, discover, run_scan
-from trueband.track import (
-    DEFAULT_SEGMENT_SECONDS,
-    AnalysisParams,
-    Measurement,
-    measure_audio,
-)
+from trueband.track import DEFAULT_SEGMENT_SECONDS, AnalysisParams, measure_audio
 
 log = logging.getLogger("trueband")
 
@@ -38,6 +32,14 @@ EXIT_OK = 0
 EXIT_FLAGGED = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
+
+#: Which statuses each --show / --fail-on value selects.
+SHOW = {
+    "all": set(Status),
+    "flagged": {Status.SUSPECT, Status.BORDERLINE, Status.ERROR},
+    "suspect": {Status.SUSPECT},
+    "borderline": {Status.SUSPECT, Status.BORDERLINE},
+}
 
 EPILOG = """\
 status meanings:
@@ -71,24 +73,19 @@ def parse_hz(text: str) -> float:
     return value
 
 
-def _positive_float(text: str) -> float:
-    try:
-        value = float(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
-    if value <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return value
+def _positive(kind: type[int] | type[float]) -> Callable[[str], float]:
+    """Argparse type: a number of ``kind`` greater than zero."""
 
+    def parse(text: str) -> float:
+        try:
+            value = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a valid {kind.__name__}: {text!r}") from None
+        if value <= 0:
+            raise argparse.ArgumentTypeError("must be greater than zero")
+        return value
 
-def _positive_int(text: str) -> int:
-    try:
-        value = int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
-    if value < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
-    return value
+    return parse
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,21 +182,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     th.add_argument(
         "--margin-db",
-        type=_positive_float,
+        type=_positive(float),
         default=AnalysisParams().margin_db,
         metavar="DB",
         help="content counts if within DB of the 1-5 kHz level (default: %(default)s)",
     )
     th.add_argument(
         "--sharp-cliff-db",
-        type=_positive_float,
+        type=_positive(float),
         default=DEFAULT_SHARP_CLIFF_DB,
         metavar="DB",
         help="drop across the cutoff that counts as an encoder-style cliff (default: %(default)s)",
     )
     th.add_argument(
         "--segment-seconds",
-        type=_positive_float,
+        type=_positive(float),
         default=DEFAULT_SEGMENT_SECONDS,
         metavar="S",
         help="length of each analysed excerpt (default: %(default)s)",
@@ -209,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "-j",
         "--workers",
-        type=_positive_int,
+        type=_positive(int),
         default=min(8, os.cpu_count() or 2),
         help="files analysed in parallel (default: %(default)s)",
     )
@@ -247,13 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _setup_logging(verbose: int, quiet: bool) -> None:
-    level = logging.WARNING
-    if quiet:
-        level = logging.ERROR
-    elif verbose >= 2:
-        level = logging.DEBUG
-    elif verbose == 1:
-        level = logging.INFO
+    levels = [logging.WARNING, logging.INFO, logging.DEBUG]
+    level = logging.ERROR if quiet else levels[min(verbose, 2)]
     logging.basicConfig(level=level, format="trueband: %(message)s", stream=sys.stderr)
 
 
@@ -273,12 +265,6 @@ def _explain(args: argparse.Namespace, tools: Tools, params: AnalysisParams, th:
             return EXIT_USAGE
         print(f"\nSaved plot to {args.plot}")
     return EXIT_OK if m.error is None else EXIT_FLAGGED
-
-
-def _open_output(path: Path | None) -> TextIO:
-    if path is None:
-        return sys.stdout
-    return path.open("w", encoding="utf-8", newline="")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -331,20 +317,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     show_progress = not (args.quiet or args.no_progress) and sys.stderr.isatty()
     progress = Progress(sys.stderr) if show_progress else None
-
-    def on_result(target: object, m: Measurement) -> None:
-        if m.error:
-            log.info("%s: %s", m.path, m.error)
-
     started = time.monotonic()
     try:
-        results = run_scan(
-            targets, tools, params, workers=args.workers, cache=cache, progress=progress, on_result=on_result
-        )
+        results = run_scan(targets, tools, params, workers=args.workers, cache=cache, progress=progress)
     except KeyboardInterrupt:
-        if progress:
-            progress.close()
-        print("trueband: interrupted" + (" (progress saved to cache)" if cache else ""), file=sys.stderr)
+        print("\ntrueband: interrupted" + (" (progress saved to cache)" if cache else ""), file=sys.stderr)
         return EXIT_INTERRUPTED
     finally:
         if progress:
@@ -352,15 +329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     elapsed = time.monotonic() - started
 
     rows = [Row(t.display, results[t.path], classify(results[t.path], th)) for t in targets]
-    shown = rows
-    if args.show == "flagged":
-        shown = [r for r in rows if r.verdict.status is not Status.OK]
-    elif args.show == "suspect":
-        shown = [r for r in rows if r.verdict.status is Status.SUSPECT]
-    shown = sort_rows(shown, args.sort)
+    shown = sort_rows([r for r in rows if r.verdict.status in SHOW[args.show]], args.sort)
 
     try:
-        out = _open_output(args.output)
+        out = args.output.open("w", encoding="utf-8", newline="") if args.output else sys.stdout
     except OSError as exc:
         log.error("cannot write %s: %s", args.output, exc.strerror or exc)
         return EXIT_USAGE
@@ -371,7 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_json(shown, out, th, params.signature())
         else:
             color = args.color == "always" or (
-                args.color == "auto" and args.output is None and out.isatty() and "NO_COLOR" not in os.environ
+                args.color == "auto" and not args.output and out.isatty() and "NO_COLOR" not in os.environ
             )
             write_table(shown, out, color=color)
     finally:
@@ -384,9 +356,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.output:
             print(f"Report written to {args.output}", file=sys.stderr)
 
-    statuses = {r.verdict.status for r in rows}
-    if args.fail_on == "suspect" and Status.SUSPECT in statuses:
-        return EXIT_FLAGGED
-    if args.fail_on == "borderline" and statuses & {Status.SUSPECT, Status.BORDERLINE}:
+    if args.fail_on and any(r.verdict.status in SHOW[args.fail_on] for r in rows):
         return EXIT_FLAGGED
     return EXIT_OK

@@ -79,10 +79,13 @@ def _khz(hz: float | None) -> str:
     return "-" if hz is None else f"{hz / 1000:.1f}k"
 
 
+_COLORS = {Status.SUSPECT: "31", Status.BORDERLINE: "33", Status.OK: "32", Status.ERROR: "35"}
+
+
 def write_table(rows: Sequence[Row], out: TextIO, *, color: bool = False) -> None:
-    """Human-readable aligned table."""
-    colors = {Status.SUSPECT: "31", Status.BORDERLINE: "33", Status.OK: "32", Status.ERROR: "35"}
+    """Human-readable aligned table; the last column (path and note) is unpadded."""
     header = ["STATUS", "CUTOFF", "CLIFF", "CODEC", "KBPS", "PATH"]
+    right_aligned = {1, 2, 4}
     body = []
     for r in rows:
         m = r.measurement
@@ -96,23 +99,20 @@ def write_table(rows: Sequence[Row], out: TextIO, *, color: bool = False) -> Non
                 r.display + (f"  ({r.verdict.note})" if r.verdict.note else ""),
             ]
         )
-    widths = [max(len(header[i]), *(len(b[i]) for b in body)) if body else len(header[i]) for i in range(5)]
+    widths = [max(len(row[i]) for row in [header, *body]) for i in range(len(header) - 1)]
 
-    def fmt(cells: list[str], status: Status | None = None) -> str:
-        first = cells[0].ljust(widths[0])
-        if color and status is not None:
-            first = f"\033[{colors[status]}m{first}\033[0m"
-        mid = [
-            cells[1].rjust(widths[1]),
-            cells[2].rjust(widths[2]),
-            cells[3].ljust(widths[3]),
-            cells[4].rjust(widths[4]),
+    def line(cells: list[str], status: Status | None = None) -> str:
+        padded = [
+            c.rjust(w) if i in right_aligned else c.ljust(w)
+            for i, (c, w) in enumerate(zip(cells[:-1], widths, strict=True))
         ]
-        return "  ".join([first, *mid, cells[5]]).rstrip()
+        if color and status is not None:
+            padded[0] = f"\033[{_COLORS[status]}m{padded[0]}\033[0m"
+        return "  ".join([*padded, cells[-1]]).rstrip() + "\n"
 
-    out.write(fmt(header) + "\n")
+    out.write(line(header))
     for r, cells in zip(rows, body, strict=True):
-        out.write(fmt(cells, r.verdict.status) + "\n")
+        out.write(line(cells, r.verdict.status))
 
 
 def write_csv(rows: Sequence[Row], out: TextIO) -> None:

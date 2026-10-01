@@ -9,7 +9,7 @@ import os
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -224,9 +224,6 @@ class ResultCache:
         self._dirty = 0
 
 
-ProgressFn = Callable[[int, int], None]
-
-
 def run_scan(
     targets: Sequence[Target],
     tools: Tools,
@@ -234,72 +231,45 @@ def run_scan(
     *,
     workers: int,
     cache: ResultCache | None = None,
-    progress: ProgressFn | None = None,
-    on_result: Callable[[Target, Measurement], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[Path, Measurement]:
-    """Measure every target, using up to ``workers`` threads.
+    """Measure every target (cached results first), using up to ``workers`` threads.
 
     Work is mostly ffmpeg subprocesses and numpy FFTs, both of which release
-    the GIL, so threads parallelise well here.
-
-    On ``KeyboardInterrupt`` pending work is cancelled, the cache is saved and
-    the interrupt is re-raised.
+    the GIL, so threads parallelise well here. On ``KeyboardInterrupt`` the
+    remaining work is cancelled, the cache is saved and the interrupt re-raised.
     """
     results: dict[Path, Measurement] = {}
-    todo: list[Target] = []
     for t in targets:
         cached = cache.get(t.path) if cache else None
         if cached is not None:
             results[t.path] = cached
-        else:
-            todo.append(t)
-    total = len(targets)
-    done = len(results)
+    todo = [t for t in targets if t.path not in results]
+    if results:
+        log.info("%d file(s) loaded from cache, %d to analyse", len(results), len(todo))
     if progress:
-        progress(done, total)
-    if done:
-        log.info("%d file(s) loaded from cache, %d to analyse", done, len(todo))
+        progress(len(results), len(targets))
 
     pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="trueband")
-    pending: dict[Future[Measurement], Target] = {}
-    queue = iter(todo)
-
-    def submit_next() -> bool:
-        t = next(queue, None)
-        if t is None:
-            return False
-        pending[pool.submit(measure, t.path, tools, params)] = t
-        return True
-
     try:
-        for _ in range(max(1, workers) * 2):
-            if not submit_next():
-                break
-        while pending:
-            finished, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
-            for fut in finished:
-                t = pending.pop(fut)
-                m = fut.result()
-                results[t.path] = m
-                if cache:
-                    cache.put(t.path, m)
-                    cache.save()
-                if on_result:
-                    on_result(t, m)
-                done += 1
-                if progress:
-                    progress(done, total)
-                submit_next()
+        futures = {pool.submit(measure, t.path, tools, params): t for t in todo}
+        for fut in as_completed(futures):
+            t = futures[fut]
+            m = results[t.path] = fut.result()
+            if m.error:
+                log.info("%s: %s", t.display, m.error)
+            if cache:
+                cache.put(t.path, m)
+                cache.save()
+            if progress:
+                progress(len(results), len(targets))
     except KeyboardInterrupt:
-        for fut in pending:
-            fut.cancel()
         pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
         if cache:
             cache.save(force=True)
-        raise
-    pool.shutdown(wait=True)
-    if cache:
-        cache.save(force=True)
+    pool.shutdown()
     return results
 
 

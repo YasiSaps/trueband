@@ -119,6 +119,23 @@ def _decode_excerpts(
     return excerpts
 
 
+def _file_problem(path: Path) -> str | None:
+    """Why ``path`` can't be read at all (missing, empty, unreadable), or None."""
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return "file not found"
+    except PermissionError:
+        return "permission denied"
+    except OSError as exc:
+        return f"cannot stat file: {exc.strerror or exc}"
+    if size == 0:
+        return "empty file (0 bytes)"
+    if not os.access(path, os.R_OK):
+        return "permission denied"
+    return None
+
+
 def measure_audio(
     path: Path, tools: Tools, params: AnalysisParams
 ) -> tuple[Measurement, CutoffEstimate | None]:
@@ -127,23 +144,8 @@ def measure_audio(
     Never raises for per-file problems: they are reported in
     ``Measurement.error``. Only programming errors propagate.
     """
-    m = Measurement(path=str(path))
-    try:
-        st = path.stat()
-    except FileNotFoundError:
-        m.error = "file not found"
-        return m, None
-    except PermissionError:
-        m.error = "permission denied"
-        return m, None
-    except OSError as exc:
-        m.error = f"cannot stat file: {exc.strerror or exc}"
-        return m, None
-    if st.st_size == 0:
-        m.error = "empty file (0 bytes)"
-        return m, None
-    if not os.access(path, os.R_OK):
-        m.error = "permission denied"
+    m = Measurement(path=str(path), error=_file_problem(path))
+    if m.error:
         return m, None
 
     try:
