@@ -4,104 +4,61 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-**Find the tracks in your music library whose sound doesn't match their file format.**
+**Find the tracks in your music library that aren't the quality they claim to be.**
 
-A 128 kbps YouTube rip that was later saved as a "320 kbps" MP3 still sounds like a
-128 kbps rip, and its bitrate tag won't tell you. Neither will a FLAC that was made from
-an MP3. trueband doesn't read tags. It decodes the audio, measures where the
-high-frequency content actually stops, and flags files whose bandwidth looks like a
-low-bitrate lossy source.
+A file can *say* it's a 320 kbps MP3 or a lossless FLAC when it was really made from a
+low-quality 128 kbps rip. The label changed, but the sound didn't. trueband ignores the
+label and checks the audio itself. It gives you a list of the tracks worth replacing.
+
+## Quick start
+
+```bash
+brew install ffmpeg                                     # 1. install ffmpeg (Linux: sudo apt install ffmpeg)
+pipx install git+https://github.com/YasiSaps/trueband   # 2. install trueband
+trueband ~/Music                                        # 3. scan a folder
+```
+
+You get one line per track, worst first (this is real output from the
+[demo library](#try-it-on-a-demo-library)):
 
 ```console
-$ trueband demo --exclude STEMS
-STATUS      CUTOFF  CLIFF  CODEC      KBPS  PATH
-suspect      16.8k   92dB  mp3         320  demo/Downloads/Peak Time Anthem (320).mp3  (tagged 320 kbps, but a typical 320 kbps encode reaches ~20.2 kHz: likely re-encoded from a lower-bitrate source)
-suspect      17.3k   92dB  flac       1687  demo/Downloads/Rare Edit [FLAC].flac  (lossless file with a lossy-style cutoff: likely converted from a lossy source)
-suspect      17.3k    4dB  pcm_s16le  1411  demo/House/Late Night Rhodes.wav  (gradual roll-off, no sharp encoder cliff: may be the recording itself)
-borderline   18.9k   92dB  mp3         192  demo/Downloads/Old Promo.mp3  (bandwidth consistent with its 192 kbps bitrate: a genuinely low-bitrate file)
-error            -      -  -             -  demo/Downloads/Incomplete Download.mp3  (empty file (0 bytes))
-error            -      -  -             -  demo/Downloads/not-really-audio.m4a  (not readable as audio: Invalid data found when processing input)
-ok           20.2k   91dB  mp3         320  demo/House/Warehouse Tool.mp3
-ok           22.1k      -  flac       1014  demo/House/Night Drive (Original Mix).flac
-ok           22.1k      -  aac         256  demo/House/Sunrise Dub.m4a
-Scanned 9 files: 3 suspect, 1 borderline, 3 ok, 2 error (0.3s)
+STATUS      CUTOFF  CLIFF  CODEC  KBPS  PATH
+suspect      16.8k   92dB  mp3     320  Downloads/Peak Time Anthem (320).mp3  (tagged 320 kbps, but a typical 320 kbps encode reaches ~20.2 kHz: likely re-encoded from a lower-bitrate source)
+suspect      17.3k   92dB  flac   1687  Downloads/Rare Edit [FLAC].flac  (lossless file with a lossy-style cutoff: likely converted from a lossy source)
+borderline   18.9k   92dB  mp3     192  Downloads/Old Promo.mp3  (bandwidth consistent with its 192 kbps bitrate: a genuinely low-bitrate file)
+ok           20.2k   91dB  mp3     320  House/Warehouse Tool.mp3
+Scanned 4 files: 2 suspect, 1 borderline, 1 ok, 0 error (0.3s)
 ```
 
-*(This is real output from the synthetic demo library made by
-[`scripts/make_demo_library.py`](scripts/make_demo_library.py). Every file's history is
-known, so you can check each verdict. Run it yourself, see [Try it](#try-it-on-a-demo-library).)*
+## What the results mean
+
+| Status | In plain words | What to do |
+|---|---|---|
+| **suspect** | Lower quality than the file claims. It most likely came from a 160 kbps or lower source. | Listen to it, and look for a better copy. |
+| **borderline** | Roughly 192 kbps quality. | Usually fine. Consider replacing it if it's going on a big sound system. |
+| **ok** | Full quality. | Nothing. |
+| **error** | Couldn't be read: empty, broken, or not really audio. | Check or delete the file. |
+
+The note at the end of each line says *why*: re-encoded at a higher bitrate, a "fake"
+FLAC/WAV made from an MP3, honestly low bitrate, or a naturally dark recording.
 
 > [!IMPORTANT]
-> **trueband is a heuristic. Its output is a shortlist to check, not a verdict.**
-> Some recordings are naturally dark: solo piano, old masters, lo-fi, heavily filtered
-> mixes. They can show a low cutoff with nothing wrong. Some low-quality sources
-> (modern Opus and AAC encoders) keep their full bandwidth and can't be caught this way.
-> Listen to flagged tracks, or open them in a spectrogram viewer, before deleting or
-> replacing anything. See [Limitations](#limitations).
+> **Treat the results as a shortlist, not a verdict.** Some music is naturally dull at
+> the top end (old recordings, solo piano, lo-fi), and a few low-quality sources can't
+> be detected at all. Listen before you delete anything. See [Limitations](#limitations).
 
----
-
-## Contents
-
-- [Install](#install)
-- [Usage](#usage)
-- [Reading the report](#reading-the-report)
-- [What a low cutoff means depends on the format](#what-a-low-cutoff-means-depends-on-the-format)
-- [How it works](#how-it-works)
-- [How the thresholds were chosen](#how-the-thresholds-were-chosen)
-- [Limitations](#limitations)
-- [Prior art](#prior-art)
-- [Development](#development)
-
-## Install
-
-trueband needs **Python 3.10+** and **[ffmpeg](https://ffmpeg.org/)** (both `ffmpeg` and
-`ffprobe`) on your `PATH`. Its only Python dependency is numpy.
+## Common tasks
 
 ```bash
-# 1. ffmpeg
-brew install ffmpeg            # macOS
-sudo apt install ffmpeg        # Debian / Ubuntu
-winget install ffmpeg          # Windows
-
-# 2. trueband (pipx keeps it in its own environment)
-pipx install git+https://github.com/YasiSaps/trueband
-
-# optional: PNG spectrum plots for --explain --plot
-pipx install "trueband[plot] @ git+https://github.com/YasiSaps/trueband"
+trueband ~/Music --exclude STEMS                     # skip folders (or files) by name or pattern
+trueband ~/Music --show flagged -f csv -o review.csv # only the problem files, as a spreadsheet
+trueband ~/Music --cache ~/.cache/trueband.json      # big library: resume where you left off
+trueband --explain "track.mp3"                       # show why one file got its verdict
+trueband incoming/ --fail-on suspect -q              # for scripts: exit code 1 if anything is suspect
 ```
 
-CI runs on Linux and macOS. Windows should work, since everything goes through ffmpeg
-and pathlib, but it isn't tested in CI yet. Reports from Windows users are welcome.
-
-Or with plain pip (`pip install git+https://github.com/YasiSaps/trueband`), or from a
-clone with `pip install .`. If ffmpeg lives somewhere unusual, set `TRUEBAND_FFMPEG`
-and `TRUEBAND_FFPROBE` to the executables. If ffmpeg is missing, trueband exits with an
-install hint instead of a stack trace.
-
-## Usage
-
-```bash
-# Scan a folder (recursively). Default output: a table, worst files first.
-trueband ~/Music/DJ
-
-# Several folders/files; skip stems and a scratch folder
-trueband ~/Music/DJ ~/Downloads/new-promos --exclude STEMS --exclude '*_to_delete*'
-
-# Only the files worth a look, as CSV for a spreadsheet
-trueband ~/Music/DJ --show flagged --format csv --output review.csv
-
-# Big library? Cache results so an interrupted or repeated scan resumes instantly
-trueband ~/Music/DJ --cache ~/.cache/trueband.json
-
-# Why was this file flagged? Show its spectrum (and optionally save a plot)
-trueband --explain "Peak Time Anthem (320).mp3" --plot anthem.png
-
-# Use in scripts: exit status 1 if anything is suspect
-trueband incoming/ --fail-on suspect --quiet
-```
-
-`--explain` prints the measurement and a text spectrum, one bar per 500 Hz band:
+`--explain` draws the file's frequency spectrum in the terminal. The point where the
+bars collapse is where the original encoder cut the sound off:
 
 ```console
 $ trueband --explain "demo/Downloads/Peak Time Anthem (320).mp3"
@@ -122,7 +79,38 @@ Thresholds:  suspect < 18.0 kHz, borderline < 19.2 kHz, content = within 45 dB o
   ...
 ```
 
-### All options
+---
+
+*Everything below is reference detail.*
+
+- [Install options](#install-options)
+- [All options](#all-options)
+- [Reading the report columns](#reading-the-report-columns)
+- [What a low cutoff means depends on the format](#what-a-low-cutoff-means-depends-on-the-format)
+- [How it works](#how-it-works)
+- [How the thresholds were chosen](#how-the-thresholds-were-chosen)
+- [Limitations](#limitations)
+- [Prior art](#prior-art)
+- [Development](#development)
+
+## Install options
+
+trueband needs **Python 3.10+** and **[ffmpeg](https://ffmpeg.org/)** (`ffmpeg` and
+`ffprobe`) on your `PATH`. Its only Python dependency is numpy.
+
+- **ffmpeg:** `brew install ffmpeg` (macOS), `sudo apt install ffmpeg` (Debian/Ubuntu),
+  `winget install ffmpeg` (Windows). If it lives somewhere unusual, set
+  `TRUEBAND_FFMPEG` and `TRUEBAND_FFPROBE`. If ffmpeg is missing, trueband prints an
+  install hint, not a stack trace.
+- **trueband:** `pipx install git+https://github.com/YasiSaps/trueband` (recommended),
+  `pip install git+https://github.com/YasiSaps/trueband`, or `pip install .` from a clone.
+- **PNG plots for `--explain --plot`:**
+  `pipx install "trueband[plot] @ git+https://github.com/YasiSaps/trueband"`.
+
+CI runs on Linux and macOS. Windows should work, since everything goes through ffmpeg
+and pathlib, but it isn't tested in CI yet. Reports from Windows users are welcome.
+
+## All options
 
 | Option | Default | What it does |
 |---|---|---|
@@ -151,14 +139,14 @@ Exit status: `0` success (even if files were flagged, unless `--fail-on`), `1` f
 with `--fail-on` (or `--explain` on an unreadable file), `2` usage error or ffmpeg
 missing, `130` interrupted (with `--cache`, progress so far is saved).
 
-### Try it on a demo library
+## Try it on a demo library
 
 ```bash
 python scripts/make_demo_library.py demo/
 trueband demo/
 ```
 
-## Reading the report
+## Reading the report columns
 
 | Column | Meaning |
 |---|---|
@@ -169,8 +157,8 @@ trueband demo/
 | **note** | A plain-language reading: re-encode, fake lossless, genuinely low bitrate, gradual roll-off, or sample-rate-limited. |
 
 A sensible way to work through a report: start with `suspect` rows that have a big
-cliff and a re-encode or fake-lossless note. Those are the strongest cases. Treat
-"gradual roll-off" rows with the most suspicion, because they may be fine. Use
+cliff and a re-encode or fake-lossless note. Those are the strongest cases. Be most
+cautious about "gradual roll-off" rows, because those files may be fine. Use
 `--explain` (or [Spek](https://www.spek.cc/)) to look before acting.
 
 ## What a low cutoff means depends on the format
